@@ -50,6 +50,58 @@ const agent = new WMPAgent(store, SELF_ID);
 fanOut.start();
 
 // ---------------------------------------------------------------------------
+// WMP response builder — generates valid responses for incoming requests
+// ---------------------------------------------------------------------------
+
+function buildResponse(
+  id: string | number,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  sessionId: string,
+): Record<string, unknown> {
+  const wmpMeta = { version: "0.1", session_id: sessionId };
+
+  switch (method) {
+    case "wmp.session.create":
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          wmp: wmpMeta,
+          security: (params as Record<string, unknown>)?.security ?? { mode: "tls" },
+        },
+      };
+
+    case "wmp.flow.start":
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          wmp: wmpMeta,
+          flow_id:
+            (params as Record<string, unknown>)?.flow_id ?? `flow-${Date.now()}`,
+          flow_type:
+            (params as Record<string, unknown>)?.flow_type ?? "unknown",
+        },
+      };
+
+    case "wmp.resolve":
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: { wmp: wmpMeta },
+      };
+
+    default:
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: { wmp: wmpMeta },
+      };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Hono app
 // ---------------------------------------------------------------------------
 
@@ -134,6 +186,59 @@ app.get(
       fanOut.removeClient(ws);
     },
   })),
+);
+
+// --- WMP WebSocket endpoint (protocol peer) ---
+
+app.get(
+  "/wmp/ws",
+  upgradeWebSocket(() => {
+    let sessionId = `ws-${Date.now()}`;
+
+    return {
+      onOpen() {
+        store.createSession(sessionId, {
+          securityMode: "tls",
+        });
+      },
+
+      onMessage(evt, ws) {
+        try {
+          const raw = JSON.parse(typeof evt.data === "string" ? evt.data : evt.data.toString());
+          const method: string = raw.method ?? "(response)";
+          const sid: string = raw.params?.wmp?.session_id ?? sessionId;
+          const sender: string = raw.params?.wmp?.sender ?? "unknown";
+
+          // Log inbound
+          store.log(sid, "in", raw, method);
+
+          // Track session ID from session.create
+          if (method === "wmp.session.create") {
+            sessionId = sid || sessionId;
+            if (raw.params?.wmp?.sender) {
+              store.addMember(sessionId, {
+                participant: raw.params.wmp.sender,
+                joinedAt: new Date().toISOString(),
+              });
+            }
+          }
+
+          // If it's a request (has id), send a response
+          if (raw.id !== undefined && raw.method) {
+            const response = buildResponse(raw.id, method, raw.params, sessionId);
+            store.log(sessionId, "out", response, `${method} (response)`);
+            ws.send(JSON.stringify(response));
+          }
+        } catch {
+          // ignore malformed messages
+        }
+      },
+
+      onClose() {
+        // session stays in store for review
+      },
+    };
+  }),
 );
 
 // --- Static files (SPA) ---
