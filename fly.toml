@@ -1,0 +1,16 @@
+app = "wmp-inspector"
+primary_region = "arn"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[env]
+  PORT = "8080"
+  BASE_URL = "https://wmp-inspector.fly.dev"
+  SELF_ID = "https://wmp-inspector.fly.dev"
