@@ -174,6 +174,103 @@ app.get("/api/status", (c) => {
   });
 });
 
+// --- HTTP+SSE transport (WMP spec §4.5) ---
+
+// SSE clients keyed by session ID
+const sseClients = new Map<string, Set<WritableStreamDefaultWriter<Uint8Array>>>();
+
+// POST /wmp/rpc — receive JSON-RPC requests, return responses synchronously
+app.post("/wmp/rpc", async (c) => {
+  try {
+    const raw = await c.req.json();
+    const method: string = raw.method ?? "(response)";
+    const sessionIdHeader = c.req.header("Wmp-Session-Id");
+    const sid: string = raw.params?.wmp?.session_id ?? sessionIdHeader ?? `rpc-${Date.now()}`;
+
+    // Log inbound
+    store.log(sid, "in", raw, method);
+
+    // Ensure session exists
+    if (!store.getSession(sid)) {
+      store.createSession(sid, { securityMode: "tls" });
+    }
+
+    // Track sender as member
+    if (raw.params?.wmp?.sender) {
+      store.addMember(sid, {
+        participant: raw.params.wmp.sender,
+        joinedAt: new Date().toISOString(),
+      });
+    }
+
+    // If it's a request (has id and method), return a JSON-RPC response
+    if (raw.id !== undefined && raw.method) {
+      const response = buildResponse(raw.id, method, raw.params, sid);
+      store.log(sid, "out", response, `${method} (response)`);
+      return c.json(response);
+    }
+
+    // Notifications: accepted, push to SSE if anyone is listening
+    const writers = sseClients.get(sid);
+    if (writers) {
+      const eventData = `event: wmp\ndata: ${JSON.stringify(raw)}\n\n`;
+      const encoded = new TextEncoder().encode(eventData);
+      for (const writer of writers) {
+        try { await writer.write(encoded); } catch { writers.delete(writer); }
+      }
+    }
+
+    return c.json({ ok: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 400);
+  }
+});
+
+// GET /wmp/events — SSE stream for server→client messages
+app.get("/wmp/events", (c) => {
+  const sessionId = c.req.query("session_id") ?? "unknown";
+
+  const { readable, writable } = new TransformStream<Uint8Array>();
+  const writer = writable.getWriter();
+
+  // Register this SSE client
+  let clients = sseClients.get(sessionId);
+  if (!clients) {
+    clients = new Set();
+    sseClients.set(sessionId, clients);
+  }
+  clients.add(writer);
+
+  // Subscribe to store events for this session
+  const unsub = store.subscribe((event) => {
+    if (event.type === "message" && event.entry.sessionId === sessionId && event.entry.direction === "out") {
+      const data = `event: wmp\ndata: ${JSON.stringify(event.entry.raw)}\n\n`;
+      writer.write(new TextEncoder().encode(data)).catch(() => {});
+    }
+  });
+
+  // Send initial comment to keep connection alive
+  writer.write(new TextEncoder().encode(": connected\n\n")).catch(() => {});
+
+  // Cleanup on close
+  c.req.raw.signal.addEventListener("abort", () => {
+    unsub();
+    clients?.delete(writer);
+    if (clients?.size === 0) sseClients.delete(sessionId);
+    writer.close().catch(() => {});
+  });
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
+});
+
 // --- Browser WebSocket (fan-out) ---
 
 app.get(
