@@ -151,8 +151,8 @@ app.get("*", serveStatic({ root: "../frontend/dist", path: "index.html" }));
 // Start server
 // ---------------------------------------------------------------------------
 
-const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
-  console.log(`wmp-inspector listening on http://localhost:${info.port}`);
+const server = serve({ fetch: app.fetch, port: PORT, hostname: "0.0.0.0" }, (info) => {
+  console.log(`wmp-inspector listening on http://0.0.0.0:${info.port}`);
   console.log(`  Base URL: ${BASE_URL}`);
   console.log(`  Self ID:  ${SELF_ID}`);
 });
