@@ -12,6 +12,8 @@
  *   - /*                   GET  — static SPA files
  */
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -23,6 +25,9 @@ import { FanOut } from "./fan-out.js";
 import { WMPAgent } from "./wmp-agent.js";
 import { wellKnownRoutes } from "./well-known.js";
 import { decodePayload } from "./decoder.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const STATIC_ROOT = path.resolve(__dirname, "../../frontend/dist");
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -135,17 +140,11 @@ app.get(
 
 app.use(
   "/*",
-  serveStatic({
-    root: "../frontend/dist",
-    rewriteRequestPath: (path) => {
-      // SPA fallback: serve index.html for non-file paths
-      return path;
-    },
-  }),
+  serveStatic({ root: STATIC_ROOT }),
 );
 
 // SPA fallback — serve index.html for any path not matched above
-app.get("*", serveStatic({ root: "../frontend/dist", path: "index.html" }));
+app.get("*", serveStatic({ root: STATIC_ROOT, path: "index.html" }));
 
 // ---------------------------------------------------------------------------
 // Start server
