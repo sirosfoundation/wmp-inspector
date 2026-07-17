@@ -25,6 +25,7 @@ import { FanOut } from "./fan-out.js";
 import { WMPAgent } from "./wmp-agent.js";
 import { wellKnownRoutes } from "./well-known.js";
 import { decodePayload } from "./decoder.js";
+import { InspectorMlsProvider } from "./mls-provider.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_ROOT = path.resolve(__dirname, "../../frontend/dist");
@@ -46,6 +47,7 @@ const SELF_ID =
 const store = new SessionStore();
 const fanOut = new FanOut(store);
 const agent = new WMPAgent(store, SELF_ID);
+const mlsProvider = new InspectorMlsProvider(SELF_ID);
 
 fanOut.start();
 
@@ -166,11 +168,84 @@ app.post("/api/decode", async (c) => {
   return c.json(result);
 });
 
+// --- MLS API ---
+
+app.post("/api/mls/key-package", async (c) => {
+  try {
+    const body = await c.req.json<{ cipher_suite?: number }>().catch(() => ({ cipher_suite: undefined }));
+    const kp = await mlsProvider.generateKeyPackage(body.cipher_suite);
+    return c.json(kp);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/api/mls/group", async (c) => {
+  try {
+    const body = await c.req.json<{ cipher_suite?: number }>().catch(() => ({ cipher_suite: undefined }));
+    const group = await mlsProvider.createMlsGroup(body.cipher_suite);
+    return c.json(group);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/api/mls/group/:id/add", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const body = await c.req.json<{ key_package: string }>();
+    const result = await mlsProvider.addMember(groupId, body.key_package);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/api/mls/group/:id/encrypt", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const body = await c.req.json<{ plaintext: string }>();
+    const plaintext = new TextEncoder().encode(body.plaintext);
+    const result = await mlsProvider.encrypt(groupId, plaintext);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/api/mls/group/:id/decrypt", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const body = await c.req.json<{ ciphertext: string }>();
+    const result = await mlsProvider.decrypt(groupId, body.ciphertext);
+    return c.json({
+      plaintext: new TextDecoder().decode(result.plaintext),
+      epoch: result.epoch,
+    });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+app.post("/api/mls/welcome", async (c) => {
+  try {
+    const body = await c.req.json<{ welcome: string }>();
+    const result = await mlsProvider.processWelcome(body.welcome);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 app.get("/api/status", (c) => {
   return c.json({
     uptime: process.uptime(),
     sessions: store.allSessions().length,
     clients: fanOut.clientCount,
+    mls: {
+      groups: mlsProvider.groupCount,
+      keyPackages: mlsProvider.keyPackageCount,
+    },
   });
 });
 
