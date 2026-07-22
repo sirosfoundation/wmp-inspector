@@ -115,16 +115,13 @@ export class WMPAgent {
       transport.on("error", onError);
     });
 
-    // Create session (include invitation_nonce for correlation)
-    const result = await peer.call<SessionCreateResult>(
-      "wmp.session.create",
-      {
-        wmp: { version: VERSION, sender: this.selfIdentifier },
-        capabilities_offered: { inspector: true },
-        security: { mode: "tls" },
-        invitation_nonce: invitation.nonce,
-      },
-    );
+    // Create session (include invitation nonce for correlation)
+    const result = await peer.createSession({
+      sender: this.selfIdentifier,
+      capabilities: { inspector: true },
+      security: { mode: "tls" },
+      invitationNonce: invitation.nonce,
+    });
 
     const sessionId = result.wmp?.session_id ?? `inspector-${Date.now()}`;
 
