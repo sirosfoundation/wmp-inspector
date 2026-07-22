@@ -2,6 +2,8 @@ FROM node:22-slim AS build
 
 WORKDIR /app
 
+ARG BUILD_SHA=dev
+
 # Copy workspace root
 COPY package.json package-lock.json* ./
 
@@ -17,7 +19,7 @@ COPY packages/frontend/ packages/frontend/
 COPY packages/backend/ packages/backend/
 
 # Build frontend then backend
-RUN npm run build --workspace=packages/frontend
+RUN BUILD_SHA=${BUILD_SHA} npm run build --workspace=packages/frontend
 RUN npm run build --workspace=packages/backend
 
 # --- Production image ---
