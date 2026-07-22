@@ -27,8 +27,6 @@ import {
   type Invitation,
   discoverEndpoint,
   VERSION,
-  NoopMLSHandler,
-  MLSProfile,
 } from "@sirosfoundation/wmp-js";
 import type { SessionStore } from "./session-store.js";
 
@@ -100,11 +98,6 @@ export class WMPAgent {
 
     const handler = this.createHandler(invitation);
     const peer = new Peer(transport, { handler });
-
-    // Register NoopMLSHandler for now (supports group lifecycle without crypto)
-    const mlsHandler = new NoopMLSHandler();
-    const mlsProfile = new MLSProfile(mlsHandler);
-    peer.use(mlsProfile as unknown as import("@sirosfoundation/wmp-js").Profile);
 
     // Wait for transport open
     await new Promise<void>((resolve, reject) => {
