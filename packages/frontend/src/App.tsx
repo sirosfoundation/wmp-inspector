@@ -152,6 +152,12 @@ export function App() {
           <Decoder />
         </aside>
       </div>
+
+      <footer className="app-footer">
+        <span>wmp-inspector</span>
+        <span>{__BUILD_SHA__}</span>
+        <span>{__BUILD_TIME__}</span>
+      </footer>
     </div>
   );
 }
