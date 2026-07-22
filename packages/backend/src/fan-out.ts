@@ -41,7 +41,18 @@ export class FanOut {
   }
 
   private broadcast(event: StoreEvent): void {
-    const data = JSON.stringify(event);
+    // Convert Map members to arrays for JSON serialization
+    let serializable: unknown = event;
+    if (event.type === "session") {
+      serializable = {
+        ...event,
+        session: {
+          ...event.session,
+          members: [...event.session.members.values()],
+        },
+      };
+    }
+    const data = JSON.stringify(serializable);
     for (const client of this.clients) {
       try {
         client.send(data);
