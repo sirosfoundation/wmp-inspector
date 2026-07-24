@@ -132,6 +132,27 @@ app.post("/api/invite", async (c) => {
   }
 });
 
+app.post("/api/resume", async (c) => {
+  try {
+    const body = await c.req.json<{
+      relayUrl: string;
+      sessionId: string;
+      resumptionToken: string;
+    }>();
+    if (!body.relayUrl || !body.sessionId || !body.resumptionToken) {
+      return c.json(
+        { error: "missing relayUrl, sessionId, or resumptionToken" },
+        400,
+      );
+    }
+    const sessionId = await agent.resumeSession(body);
+    return c.json({ sessionId });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 500);
+  }
+});
+
 app.get("/api/sessions", (c) => {
   const sessions = store.allSessions().map((s) => ({
     sessionId: s.sessionId,

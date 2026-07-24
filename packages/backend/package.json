@@ -12,8 +12,9 @@
   "dependencies": {
     "@hono/node-server": "^1.14.0",
     "@hono/node-ws": "^1.1.1",
-    "hono": "^4.7.0",
     "@sirosfoundation/wmp-js": "^0.5.0",
+    "eventsource": "^4.1.0",
+    "hono": "^4.7.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
