@@ -1,18 +1,25 @@
 /**
  * WMP Agent — the inspector's WMP peer that joins sessions and logs everything.
  *
- * Uses wmp-js Peer + WebSocketTransport. When an invitation is accepted,
- * the agent connects to the inviter's relay and establishes a WMP session.
+ * Uses wmp-js Peer + WebSocketTransport or HttpSseTransport. When an
+ * invitation is accepted, the agent connects to the inviter's relay and
+ * establishes a WMP session.
  */
+
+import { EventSource } from "eventsource";
 
 import {
   Peer,
   WebSocketTransport,
+  HttpSseTransport,
   parseInvitationURI,
   type Handler,
   type SessionCreateParams,
   type SessionCreateResult,
+  type SessionResumeResult,
   type SessionCloseParams,
+  type MessageDeliverParams,
+  type MessageAckParams,
   type FlowStartParams,
   type FlowStartResult,
   type FlowProgressParams,
@@ -33,7 +40,7 @@ import type { SessionStore } from "./session-store.js";
 export interface AgentSession {
   peer: Peer;
   sessionId: string;
-  invitation: Invitation;
+  invitation?: Invitation;
 }
 
 export class WMPAgent {
@@ -76,9 +83,15 @@ export class WMPAgent {
 
     // Discover relay endpoint
     let relayUrl = invitation.relay;
+    let discovered:
+      | Awaited<ReturnType<typeof discoverEndpoint>>
+      | undefined;
     if (!relayUrl) {
-      const config = await discoverEndpoint(invitation.provider);
-      relayUrl = config.endpoints.websocket ?? config.endpoints.relay;
+      discovered = await discoverEndpoint(invitation.provider);
+      relayUrl =
+        discovered.endpoints.rpc ??
+        discovered.endpoints.websocket ??
+        discovered.endpoints.relay;
       if (!relayUrl) {
         throw new Error(
           `No relay endpoint found for provider ${invitation.provider}`,
@@ -86,21 +99,105 @@ export class WMPAgent {
       }
     }
 
-    // Ensure WebSocket URL
-    if (relayUrl.startsWith("https://")) {
-      relayUrl = relayUrl.replace("https://", "wss://");
-    } else if (relayUrl.startsWith("http://")) {
-      relayUrl = relayUrl.replace("http://", "ws://");
+    const handler = this.createHandler({
+      sessionId: invitation.session_id,
+      sender: invitation.sender,
+    });
+    const { peer } = await this.connect(relayUrl, discovered, handler);
+
+    // Create session (include invitation nonce for correlation)
+    const result = await peer.createSession({
+      sender: this.selfIdentifier,
+      capabilities: { inspector: true },
+      security: { mode: "tls" },
+      invitationNonce: invitation.nonce,
+    });
+    return this.finishJoin(peer, result, {
+      provider: invitation.provider,
+      sender: invitation.sender,
+      invitation,
+    });
+  }
+
+  /**
+   * Resume an existing WMP session on a relay. Used when the inspector is
+   * given a resumption token (e.g. from wmp-cli) to observe traffic.
+   */
+  async resumeSession(opts: {
+    relayUrl: string;
+    sessionId: string;
+    resumptionToken: string;
+  }): Promise<string> {
+    const { relayUrl, sessionId, resumptionToken } = opts;
+    const handler = this.createHandler({ sessionId, sender: this.selfIdentifier });
+    const discovered = relayUrl.startsWith("https://")
+      ? await discoverEndpoint(relayUrl)
+      : undefined;
+    const { peer } = await this.connect(relayUrl, discovered, handler, sessionId);
+
+    const result = await peer.call<SessionResumeResult>("wmp.session.resume", {
+      wmp: { version: VERSION, session_id: sessionId, sender: this.selfIdentifier },
+      session_id: sessionId,
+      resumption_token: resumptionToken,
+    });
+
+    return this.finishJoin(peer, result, {
+      provider: relayUrl,
+      sender: this.selfIdentifier,
+    });
+  }
+
+  private async connect(
+    relayUrl: string,
+    discovered:
+      | Awaited<ReturnType<typeof discoverEndpoint>>
+      | undefined,
+    handler: Handler,
+    sessionId?: string,
+  ): Promise<{ peer: Peer; transport: WebSocketTransport | HttpSseTransport }> {
+    // HTTP+SSE relay (e.g. go-wmp HTTPSSE relay)
+    if (
+      relayUrl.startsWith("http://") ||
+      relayUrl.startsWith("https://") ||
+      discovered?.endpoints?.rpc
+    ) {
+      let rpcUrl = relayUrl;
+      let eventsUrl = relayUrl.endsWith("/")
+        ? relayUrl + "events"
+        : relayUrl + "/events";
+      if (discovered?.endpoints?.rpc && discovered?.endpoints?.events) {
+        rpcUrl = discovered.endpoints.rpc;
+        eventsUrl = discovered.endpoints.events;
+      } else if (discovered?.endpoints?.relay) {
+        // Legacy HTTPSSE endpoint advertised as "relay" without separate rpc/events.
+        rpcUrl = discovered.endpoints.relay;
+        eventsUrl = discovered.endpoints.relay.endsWith("/")
+          ? discovered.endpoints.relay + "events"
+          : discovered.endpoints.relay + "/events";
+      }
+      const sseTransport = new HttpSseTransport(rpcUrl, eventsUrl, {
+        EventSource: EventSource as unknown as typeof globalThis.EventSource,
+      });
+      const peer = new Peer(sseTransport, { handler });
+      if (sessionId) {
+        sseTransport.setSessionId(sessionId);
+      }
+      sseTransport.connectSSE();
+      await this.waitForTransportOpen(sseTransport);
+      return { peer, transport: sseTransport };
     }
 
-    // Connect via WebSocket
-    const transport = new WebSocketTransport(relayUrl);
+    // WebSocket relay
+    const wsTransport = new WebSocketTransport(relayUrl);
+    const peer = new Peer(wsTransport, { handler });
+    await this.waitForTransportOpen(wsTransport);
+    return { peer, transport: wsTransport };
+  }
 
-    const handler = this.createHandler(invitation);
-    const peer = new Peer(transport, { handler });
-
-    // Wait for transport open
-    await new Promise<void>((resolve, reject) => {
+  private waitForTransportOpen(
+    transport: WebSocketTransport | HttpSseTransport,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       const onOpen = () => {
         transport.off("open", onOpen);
         transport.off("error", onError);
@@ -114,29 +211,33 @@ export class WMPAgent {
       transport.on("open", onOpen);
       transport.on("error", onError);
     });
+  }
 
-    // Create session (include invitation nonce for correlation)
-    const result = await peer.createSession({
-      sender: this.selfIdentifier,
-      capabilities: { inspector: true },
-      security: { mode: "tls" },
-      invitationNonce: invitation.nonce,
-    });
-
+  private finishJoin(
+    peer: Peer,
+    result: SessionCreateResult | SessionResumeResult,
+    opts: {
+      provider?: string;
+      sender?: string;
+      invitation?: Invitation;
+    },
+  ): string {
     const sessionId = result.wmp?.session_id ?? `inspector-${Date.now()}`;
 
     // Store session info
     this.store.createSession(sessionId, {
-      provider: invitation.provider,
-      sender: invitation.sender,
+      provider: opts.provider,
+      sender: opts.sender,
       securityMode: "tls",
     });
 
-    // Add inviter as member
-    this.store.addMember(sessionId, {
-      participant: invitation.sender,
-      joinedAt: new Date().toISOString(),
-    });
+    // Add inviter/sender as member
+    if (opts.sender) {
+      this.store.addMember(sessionId, {
+        participant: opts.sender,
+        joinedAt: new Date().toISOString(),
+      });
+    }
 
     // Add self as member
     this.store.addMember(sessionId, {
@@ -145,21 +246,25 @@ export class WMPAgent {
       capabilities: { inspector: true },
     });
 
-    // Log the session creation
-    this.store.log(sessionId, "out", { method: "wmp.session.create" }, "wmp.session.create");
-    this.store.log(sessionId, "in", result, "wmp.session.create (response)");
+    // Log the session creation/resumption
+    const method = "resumption_token" in result ? "wmp.session.resume" : "wmp.session.create";
+    this.store.log(sessionId, "out", { method }, method);
+    this.store.log(sessionId, "in", result, `${method} (response)`);
 
-    this.sessions.set(sessionId, { peer, sessionId, invitation });
+    this.sessions.set(sessionId, { peer, sessionId, invitation: opts.invitation });
 
     return sessionId;
   }
 
-  private createHandler(invitation: Invitation): Handler {
+  private createHandler(context: {
+    sessionId?: string;
+    sender?: string;
+  }): Handler {
     const store = this.store;
-    const sessionIdRef = { current: "" };
+    const sessionIdRef = { current: context.sessionId ?? "" };
 
     // Helper to resolve session ID (may not be known at handler creation time)
-    const sid = () => sessionIdRef.current || invitation.session_id || "unknown";
+    const sid = () => sessionIdRef.current || context.sessionId || "unknown";
 
     return {
       async onSessionCreate(
@@ -176,6 +281,18 @@ export class WMPAgent {
 
       onSessionClose(params: SessionCloseParams): void {
         store.log(sid(), "in", params, "wmp.session.close");
+      },
+
+      onMessageDeliver(params: MessageDeliverParams): void {
+        const sessionId = params.wmp?.session_id ?? sid();
+        sessionIdRef.current = sessionId;
+        store.log(sessionId, "in", params, "wmp.message.deliver");
+      },
+
+      onMessageAck(params: MessageAckParams): void {
+        const sessionId = params.wmp?.session_id ?? sid();
+        sessionIdRef.current = sessionId;
+        store.log(sessionId, "in", params, "wmp.message.ack");
       },
 
       async onFlowStart(params: FlowStartParams): Promise<FlowStartResult> {
